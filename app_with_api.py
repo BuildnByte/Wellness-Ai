@@ -10,6 +10,11 @@ from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 import warnings
+
+# --- NEW: Import for frequent pattern mining ---
+from mlxtend.frequent_patterns import apriori, association_rules
+# ----------------------------------------------
+
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
@@ -266,6 +271,69 @@ def generate_ml_predictions(fitness_data):
     print(f"✅ Generated {len(predictions)} ML predictions.")
     return predictions
 
+# --- NEW: Function for Frequent Pattern Mining ---
+# In app_with_api.py
+
+def find_wellness_patterns(fitness_data, goals):
+    """Analyzes historical data to find frequent patterns and insights."""
+    if not fitness_data or len(fitness_data) < 3:
+        return []
+
+    print("\n🔍 Finding wellness patterns...")
+    df = pd.DataFrame(fitness_data)
+    
+    df['Met_Step_Goal'] = df['steps'] >= goals.get('steps', 10000)
+    df['Met_Calorie_Goal'] = df['calories'] >= goals.get('calories', 2500)
+    df['Met_Active_Goal'] = df['active_minutes'] >= goals.get('active_minutes', 60)
+    df['Good_Sleep'] = df['sleep_minutes'] >= (goals.get('sleep_hours', 7.5) * 60 * 0.9)
+    
+    transactions = df[['Met_Step_Goal', 'Met_Calorie_Goal', 'Met_Active_Goal', 'Good_Sleep']]
+    
+    # --- DEBUG: Print the transaction data ---
+    print("--- TRANSACTIONS FOR PATTERN MINING ---")
+    print(transactions)
+    # -----------------------------------------
+    
+    try:
+        frequent_itemsets = apriori(transactions, min_support=0.2, use_colnames=True) # Using 0.2
+        if frequent_itemsets.empty:
+            # --- DEBUG: Print if no frequent itemsets are found ---
+            print("⚠️ No frequent itemsets found with current support level.")
+            return ["Not enough consistent patterns found yet. Keep up your activities!"]
+
+        # --- DEBUG: Print the frequent itemsets that were found ---
+        print("\n--- FREQUENT ITEMSETS FOUND ---")
+        print(frequent_itemsets)
+        # --------------------------------------------------------
+
+        rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.1)
+        if rules.empty:
+            # --- DEBUG: Print if no association rules are found ---
+            print("⚠️ No strong association rules found with current lift level.")
+            return ["Found some frequent activities, but no strong connections between them yet."]
+
+        # --- DEBUG: Print the rules that were found ---
+        print("\n--- ASSOCIATION RULES FOUND ---")
+        print(rules[['antecedents', 'consequents', 'lift', 'confidence']])
+        # ----------------------------------------------
+            
+        insights = []
+        for index, rule in rules.iterrows():
+            antecedents = ", ".join(list(rule['antecedents'])).replace('_', ' ')
+            consequents = ", ".join(list(rule['consequents'])).replace('_', ' ')
+            confidence = rule['confidence']
+            
+            insight = f"💡 **Pattern Found!** When you achieve your **{antecedents}**, you are **{confidence:.0%} likely** to also achieve your **{consequents}**."
+            insights.append(insight)
+        
+        print(f"✅ Found {len(insights)} wellness patterns.")
+        return insights if insights else ["No strong wellness patterns discovered yet. Keep logging your data!"]
+
+    except Exception as e:
+        print(f"❌ Error during pattern finding: {e}")
+        return ["Could not analyze wellness patterns due to an error."]
+
+
 def generate_personalized_recommendations(record, wellness_category, is_at_risk, goals):
     """Generate personalized recommendations based on user goals"""
     recs = []
@@ -330,6 +398,17 @@ def fetch_fitness_data_endpoint():
         
         predictions = generate_ml_predictions(fitness_data)
         
+        # --- NEW: Find wellness patterns and save to session ---
+        user_goals = session.get('user_goals', {
+            'steps': 10000,
+            'calories': 2500,
+            'active_minutes': 60,
+            'sleep_hours': 7.5
+        })
+        patterns = find_wellness_patterns(fitness_data, user_goals)
+        session['wellness_patterns'] = patterns
+        # ----------------------------------------------------
+        
         session['fitness_data'] = fitness_data
         session['predictions'] = predictions
         
@@ -346,6 +425,9 @@ def fetch_fitness_data_endpoint():
 def get_dashboard_data():
     fitness_data = session.get('fitness_data')
     predictions = session.get('predictions')
+    # --- NEW: Get wellness patterns from session ---
+    patterns = session.get('wellness_patterns', [])
+    # ---------------------------------------------
 
     if not fitness_data:
         return jsonify({'error': 'No fitness data in session. Please fetch data first.'})
@@ -394,7 +476,10 @@ def get_dashboard_data():
         'chart_data': chart_data,
         'predictions': predictions,
         'summary': summary_stats,
-        'raw_data': fitness_data
+        'raw_data': fitness_data,
+        # --- NEW: Add wellness patterns to the response ---
+        'wellness_patterns': patterns
+        # ------------------------------------------------
     })
 
 @app.route('/api/set-goals', methods=['POST'])
@@ -413,7 +498,12 @@ def set_goals():
         if fitness_data:
             predictions = generate_ml_predictions(fitness_data)
             session['predictions'] = predictions
-        
+
+            # --- NEW: Regenerate patterns with new goals ---
+            patterns = find_wellness_patterns(fitness_data, session['user_goals'])
+            session['wellness_patterns'] = patterns
+            # -----------------------------------------------
+
         return jsonify({'status': 'success', 'message': 'Goals saved successfully!'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
